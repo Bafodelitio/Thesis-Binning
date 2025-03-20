@@ -21,6 +21,7 @@ from torch_geometric.utils import is_undirected
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from scipy.stats import percentileofscore
+from pathlib import Path
 
 def open_gfa_file(filename, filter=1000, root=False, kmer=4):
     G = nx.Graph()
@@ -123,8 +124,8 @@ def get_markers_to_contigs(marker_sets, contigs):
 
 #BACTERIA_MARKERS = "data/Bacteria.ms"
 #kernel = np.load("data/kernel.npz")['arr_0']
-BACTERIA_MARKERS = files('data').joinpath('Bacteria.ms')
-kernel = np.load(files('data').joinpath('kernel.npz'))['arr_0']
+BACTERIA_MARKERS = Path(__file__).parent / 'data' / 'Bacteria.ms'
+kernel = np.load(Path(__file__).parent / 'data' / 'kernel.npz')['arr_0']
 
 def count_kmers(seq, k, kmer_to_id, canonical_k):
     # Used in case kmers are used as input features
@@ -890,15 +891,17 @@ class AssemblyDataset:
         self.edges_dst = new_dsts
         self.edge_weights = np.array(new_weights)
         
-    """def calculate_coverage_threshold(self, percentile=90):
+    """
+    def calculate_coverage_threshold(self, percentile=90):
         
-        #Calculate the coverage correlation threshold based on the distribution of coverage correlations.
+        Calculate the coverage correlation threshold based on the distribution of coverage correlations.
 
-        #Args:
-        #    percentile (int): The percentile to use for determining the threshold (default: 90).
+        Args:
+            percentile (int): The percentile to use for determining the threshold (default: 90).
 
-        #Returns:
-        #    float: The coverage correlation threshold.
+        Returns:
+            float: The coverage correlation threshold.
+        
         # Ensure coverage data is available
         if not hasattr(self, 'node_depths') or len(self.node_depths) == 0:
             raise ValueError("Coverage data (node_depths) is not available in the dataset.")
@@ -919,7 +922,7 @@ class AssemblyDataset:
         print(f"Coverage correlation threshold (percentile={percentile}): {threshold:.4f}")
         self.coverage_threshold = threshold
         np.save(os.path.join(self.cache_dir, "coverage_threshold.npy"), self.coverage_threshold)
-    """
+       """
  
 def plot_and_save_loss(epoch_losses, iteration_name, value, save_dir):
     """
@@ -1115,9 +1118,12 @@ def compare_graphs(original_graph, altered_graph):
 
     return changes
 
-def plot_pca_clusters(dataset, data, embeddings, cluster_to_contig, output_path, iteration_name, value):
+def plot_pca_hq_clusters(dataset, data, embeddings, cluster_to_contig, output_path, iteration_name, value):
     """
-    Applies PCA to reduce embeddings to 2D and generates a scatter plot coloured by cluster.
+    Applies PCA to reduce embeddings to 2D and generates a scatter plot coloured by high-quality (HQ) clusters.
+    Nodes in HQ clusters are plotted with distinct colors and shapes, ensuring that each HQ cluster has a unique
+    combination of color and shape. All other nodes are plotted in black. HQ clusters are plotted last to ensure
+    they appear in the foreground.
 
     Parameters:
     - dataset: The original dataset containing node names.
@@ -1127,14 +1133,29 @@ def plot_pca_clusters(dataset, data, embeddings, cluster_to_contig, output_path,
     - output_path (str): The directory path where the plot will be saved.
     - iteration_name (str): A name used for the iteration to label the plot and file.
     - value (any): The value associated with the iteration, included in the plot title.
+    - base_directory (str): Directory containing quality_report.tsv and graphmb_best_contig2bin.tsv.
     """
-
     # Map the node indices back to their original names
     mapped_node_names = [dataset.node_names[idx] for idx in data.node_names]
 
     # Perform 2D PCA
     pca = PCA(n_components=2)
     pca_result = pca.fit_transform(embeddings)
+
+    # Load quality report and filter high-quality clusters
+    quality_report = pd.read_csv(os.path.join(Path(__file__).parent, dataset.name, 'quality_report.tsv'), sep='\t')
+    hq_clusters = quality_report[(quality_report['Completeness'] > 90) & (quality_report['Contamination'] < 5)]
+    hq_cluster_ids = set(hq_clusters['Name'])
+
+    # Load graphmb_best_contig2bin file, skipping metadata rows and fixing headers
+    contig2bin_file = os.path.join(Path(__file__).parent, dataset.name, 'graphmb_best_contig2bin.tsv')
+    contig2bin = pd.read_csv(contig2bin_file, sep='\t', skiprows=3, names=['SEQUENCEID', 'BINID'])
+
+    # Filter nodes in HQ clusters using graphmb_best_contig2bin.tsv
+    hq_nodes = set()
+    for cluster_id in hq_cluster_ids:
+        cluster_nodes = contig2bin[contig2bin['BINID'] == cluster_id]['SEQUENCEID'].tolist()
+        hq_nodes.update(cluster_nodes)
 
     # Ensure correct mapping from contig names to cluster IDs
     contig_to_cluster = {
@@ -1146,38 +1167,60 @@ def plot_pca_clusters(dataset, data, embeddings, cluster_to_contig, output_path,
     # Get all node names
     node_names = [str(name).strip().lower() for name in mapped_node_names]
 
-    # Get number of clusters
-    num_clusters = len(cluster_to_contig)
-    
+    # Get number of HQ clusters
+    num_hq_clusters = len(hq_cluster_ids)
+
     # Create a larger figure
     plt.figure(figsize=(12, 10), dpi=300)
 
-    # Use a qualitative colormap for better distinction
-    if num_clusters <= 20:
-        cmap = cm.get_cmap("tab20", num_clusters)
-    elif num_clusters <= 256:
-        cmap = cm.get_cmap("turbo", num_clusters)
+    # Use a qualitative colormap for HQ clusters
+    if num_hq_clusters <= 20:
+        cmap = plt.get_cmap("tab20", num_hq_clusters)
+    elif num_hq_clusters <= 256:
+        cmap = plt.get_cmap("turbo", num_hq_clusters)
     else:
-        cmap = cm.get_cmap("nipy_spectral", num_clusters)  # Works better for very large numbers of clusters
+        cmap = plt.get_cmap("nipy_spectral", num_hq_clusters)  # Works better for very large numbers of clusters
 
-    norm = mcolors.Normalize(vmin=0, vmax=num_clusters - 1)
+    # Define a list of marker shapes
+    marker_shapes = ['o', 's', 'D', '^', 'v', '<', '>', 'p', '*', 'h', 'H', 'x', '+', 'X', 'd', '|', '_']
 
-    # Scatter plot elements for color mapping
-    for i in range(len(embeddings)):
-        node_name = node_names[i]
-        cluster_id = contig_to_cluster.get(node_name, -1)  
+    # Assign a unique combination of color and marker shape to each HQ cluster
+    hq_cluster_styles = {}
+    for i, cluster_id in enumerate(hq_cluster_ids):
+        color = cmap(i)  # Assign a unique color from the colormap
+        marker = marker_shapes[i % len(marker_shapes)]  # Assign a unique marker shape, cycling if necessary
+        hq_cluster_styles[cluster_id] = {'color': color, 'marker': marker}
 
-        if cluster_id != -1:
-            color = cmap(norm(cluster_id))
+    # Separate HQ and non-HQ nodes
+    hq_indices = []
+    non_hq_indices = []
+    for i, node_name in enumerate(node_names):
+        if node_name in hq_nodes:
+            cluster_id = contig_to_cluster.get(node_name, -1)
+            if cluster_id in hq_cluster_styles:
+                hq_indices.append(i)
         else:
-            color = 'gray'  
+            non_hq_indices.append(i)
 
-        plt.scatter(pca_result[i, 0], pca_result[i, 1], color=color, s=8, alpha=0.6)  # Larger points with some transparency
+    # Plot non-HQ clusters first (in the background)
+    for i in non_hq_indices:
+        plt.scatter(pca_result[i, 0], pca_result[i, 1], color='black', marker='o', s=8, alpha=0.6)
 
-    # Create a proper colorbar
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    # Plot HQ clusters last (in the foreground)
+    for i in hq_indices:
+        node_name = node_names[i]
+        cluster_id = contig_to_cluster.get(node_name, -1)
+        style = hq_cluster_styles[cluster_id]
+        color = style['color']
+        marker = style['marker']
+        plt.scatter(pca_result[i, 0], pca_result[i, 1], color=color, marker=marker, s=8, alpha=0.6)
+
+    # Create a proper colorbar for HQ clusters
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=num_hq_clusters - 1))
     sm.set_array([])
-    plt.colorbar(sm, label="Cluster ID", ax=plt.gca())
+    cbar = plt.colorbar(sm, label="HQ Cluster ID", ax=plt.gca())
+    cbar.set_ticks(np.arange(num_hq_clusters))
+    cbar.set_ticklabels(hq_cluster_ids)
 
     plt.xlabel('PC1')
     plt.ylabel('PC2')
@@ -1191,6 +1234,8 @@ def plot_pca_clusters(dataset, data, embeddings, cluster_to_contig, output_path,
     plt.savefig(os.path.join(output_path, f"{iteration_name}_scatterplot.png"), bbox_inches='tight')
     plt.close()
     print(f"✅ Plot saved to {os.path.join(output_path, f'{iteration_name}_scatterplot.png')}")
+    
+#from sklearn.manifold import TSNE
 
 
     
