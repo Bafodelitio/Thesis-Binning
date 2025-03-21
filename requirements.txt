@@ -7,3 +7,5 @@ scikit-learn
 torch
 torch-geometric
 openpyxl
+torch-sparse @ https://data.pyg.org/whl/torch-2.1.0%2Bcu118/torch_sparse-0.6.18-cp310-cp310-linux_x86_64.whl
+pyg-lib @ https://data.pyg.org/whl/torch-2.1.0%2Bcu118/pyg_lib-0.3.0%2Bpt21cu118-cp310-cp310-linux_x86_64.whl
