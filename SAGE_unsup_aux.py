@@ -24,27 +24,27 @@ def create_pyg_graph_from_assembly(dataset):
     # Prepare node features separately
     
     node_length = torch.tensor(dataset.node_lengths, dtype=torch.float).unsqueeze(1)
-    #node_depths = torch.tensor(dataset.node_depths, dtype=torch.float).squeeze()  # New feature
+    node_depths = torch.tensor(dataset.node_depths, dtype=torch.float)#.squeeze(ONLY FOR AALE)  # New feature
     node_kmers = torch.tensor(dataset.node_kmers, dtype=torch.float)
     # Prepare node ids as a tensor (assuming node_names are unique identifiers)
     node_ids = torch.tensor([dataset.node_names.index(name) for name in dataset.node_names], dtype=torch.long)
     
     # Prepare edge index and edge weights
-    edge_index = to_undirected(torch.tensor([dataset.edges_src, dataset.edges_dst], dtype=torch.long))
-    
+    edges = np.array([dataset.edges_src, dataset.edges_dst])
+    edge_index = to_undirected(torch.from_numpy(edges).long())    
     # Create the PyTorch Geometric data object
     data = Data(edge_index=edge_index)
 
     # Assign the node features to the data object
     data.length = node_length
-    #data.depths = node_depths
+    data.depths = node_depths
     data.kmers = node_kmers
     data.node_names = node_ids #encode(dataset.node_names)
     #data.num_nodes = node_ids.size(0)
     
     if 'x' not in data:
-        data.x = torch.tensor(data.kmers, dtype=torch.float)
-        #data.x = torch.cat([data.kmers, data.depths], dim=1)
+        #data.x = torch.tensor(data.kmers, dtype=torch.float)
+        data.x = torch.cat([data.kmers, data.depths], dim=1)
     
     return data
 
@@ -144,21 +144,6 @@ def contrastive_loss(h, pos_pairs, neg_pairs, margin):
     return pos_loss + neg_loss
     
 
-@torch.no_grad()
-def validate(data, val_loader, model, device, margin):
-    model.eval()
-    total_loss = 0
-    for batch in val_loader:
-        batch = batch.to(device)
-        h = model(batch.x, batch.edge_index)
-        
-        # Generate positive and negative pairs
-        pos_pairs, neg_pairs = generate_pairs(batch, device)
-        loss = contrastive_loss(h, pos_pairs, neg_pairs, margin)
-        total_loss += loss.item() * batch.num_nodes
-
-    # Return average loss over the validation set
-    return total_loss / data.num_nodes
 
 def train(data, train_loader, model, optimizer, device, margin):#, coverage):
     model.train()
@@ -177,36 +162,6 @@ def train(data, train_loader, model, optimizer, device, margin):#, coverage):
         total_loss += loss.item() * batch.num_nodes
     # Return average loss over the entire training set
     return total_loss / data.num_nodes
-
-def train_with_validation(data, train_loader, val_loader, model, optimizer, device, margin, epochs, early_stopping=None):
-    best_val_loss = float('inf')
-    train_losses = []
-    val_losses = []
-
-    for epoch in range(epochs):
-        # Training
-        train_loss = train(data, train_loader, model, optimizer, device, margin)
-        train_losses.append(train_loss)
-
-        # Validation
-        val_loss = validate(data, val_loader, model, device, margin)
-        val_losses.append(val_loss)
-
-        print(f"Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-
-        # Early stopping based on validation loss
-        if early_stopping:
-            early_stopping(val_loss, model)
-            if early_stopping.early_stop:
-                print("Early stopping triggered")
-                break
-
-        # Save the model with the best validation loss
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), 'best_model.pth')
-
-    return train_losses, val_losses
 
 
 @torch.no_grad()
@@ -320,8 +275,12 @@ def gen_save_clusters(data, model, dataset, output_path):
     print("Embeddings Generated")
     
     # Write Bins
-    n_clusters, cluster_to_contig = write_bins(output_path, dataset, embeddings, 200000)
-    print(f"Clusters Saved in {output_path}")
+    clusters = cluster(embeddings, np.array(dataset.node_names), normalized=True, cuda=True)
+    cluster_to_contig = {i: c for (i, (n, c)) in enumerate(clusters)}
+    n_clusters = len(cluster_to_contig)+1
+    print(f"Clustered into {n_clusters} bins")
+    #_clusters, cluster_to_contig = write_bins(output_path, dataset, embeddings, 200000)
+    #print(f"Clusters Saved in {output_path}")
 
     # Evaluate Clusters
     hq_clusters, mq_clusters = eval_cluster(dataset, cluster_to_contig)
@@ -366,7 +325,15 @@ def test_value(dataset, data, parameter, value, config, base_path, results_df, c
     output_path = os.path.join(base_path, current_iter)
     os.makedirs(output_path, exist_ok=True)
 
+    """ 
+    num_neighbors = [config['num_neighbors']]  # Start with the first hop
+    for i in range(1, config['num_layers']):
+        num_neighbors.append(int(num_neighbors[-1] * 1.5))  # Multiply by 1.5 for each subsequent hop
+    """
+    
     # Initialize data loader with the current batch size
+    #num_neighbors = [config['num_neighbors'] * (2 ** i) for i in range(config['num_layers'])]
+    
     train_loader = NeighborLoader(
         data,
         num_neighbors=[config['num_neighbors']] * config['num_layers'],
@@ -502,13 +469,14 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
         values = [base_config[parameter]]
 
     for value in values:
+         
         # Test the value without updating edges
         data, results_df = test_value(dataset, data, parameter, value, config=base_config, 
                                       base_path=base_path, results_df=results_df, 
                                       counter=counter, comparison=None,
                                       first_time=first_time, current_iter_suffix=suffix, epoch_cluster=epoch_cluster)
         first_time = False  # After the first iteration, set first_time to False
-
+        
         # Update graph and re-run the model if update_edges is True
         if update_edges:
             node_depths = dataset.node_depths
@@ -523,7 +491,6 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
                                                          depth_pruning=False,
                                                          depth_linking=False)
             
-            print(f"TYPE OF DATA_UPDATED IS {type(data_updated)}")
             
             # Re-run the model with updated edges
             _, results_df = test_value(dataset, data_updated, parameter, value, 
@@ -567,7 +534,7 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
                                                   comparison=changes, 
                                                   current_iter_suffix=suffix+"_updated_&_removed_edges",
                                                   epoch_cluster=epoch_cluster)
-            
+            """
             # Update edges of the graph and add depth_pruning
             data_updated_pruned, changes = load_or_update_graph(data, dataset,
                                                                 directory, 
@@ -593,7 +560,7 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
                                                                 remove_existing_edges=False, 
                                                                 depth_pruning=False,
                                                                 depth_linking=True,
-                                                                similarity_threshold= 0.99)
+                                                                similarity_threshold= 0.9)
 
             # Re-run the model with updated depths
             _, results_df = test_value(dataset, data_updated_pruned, parameter, value, 
@@ -611,7 +578,7 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
                                                                 remove_existing_edges=False, 
                                                                 depth_pruning=True,
                                                                 depth_linking=True,
-                                                                similarity_threshold= 0.99)
+                                                                similarity_threshold= 0.9)
 
             # Re-run the model with updated depths
             _, results_df = test_value(dataset, data_updated_pruned, parameter, value, 
@@ -620,7 +587,7 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
                                                   comparison=changes, 
                                                   current_iter_suffix=suffix+"_prune_linked",
                                                   epoch_cluster=epoch_cluster)
-            
+            """
         # Increment the counter for the next iteration
         counter += 1
 
@@ -629,134 +596,164 @@ def hyperparameter_tuning(dataset, data, parameter, values, base_config, base_pa
         print(f"Results saved to {results_filename}")
 
 
-def add_hq_cluster_edges(data, dataset, cluster_ids, contig2bin):
+def validate_cluster_nodes(cluster_ids, contig2bin, dataset):
     """
-    Adds fully connected edges between nodes in high-quality clusters.
+    Validates and maps cluster nodes, checking for:
+    - Nodes existing in dataset.node_names
+    - Nodes belonging to multiple clusters
+    - Empty clusters
+    
     Args:
-        data: PyG Data object with edge_index.
-        cluster_ids: List of high-quality cluster IDs.
-        contig2bin: DataFrame mapping contigs to bins.
-        dataset: Dataset object containing node_names.
+        cluster_ids: List of cluster IDs to process
+        contig2bin: DataFrame mapping contigs to bins
+        dataset: Dataset object containing node_names
+        
     Returns:
-        data: Updated copy of the PyG Data object with added edges.
-        changes: Dictionary of changes made to the graph.
+        dict: {cluster_id: list_of_node_indices} mapping
     """
-    changes = {'added': 0, 'removed': 0, 'isolated': 0}
-    total_added_edges = 0  # Track total added edges across all clusters
+    from collections import defaultdict
+    
+    # Initialize data structures
+    cluster_to_nodes = defaultdict(list)
+    node_to_clusters = defaultdict(list)
+    missing_nodes = []
+    problematic_clusters = set()
 
-    # Add fully connected edges for each high-quality cluster
+    # Validate each cluster
     for cluster_id in cluster_ids:
-        cluster_nodes = contig2bin[contig2bin['BINID'] == cluster_id]['SEQUENCEID'].tolist()
+        # Get all contigs for this cluster
+        cluster_contigs = contig2bin[contig2bin['BINID'] == cluster_id]['SEQUENCEID']
         
-        # Convert node names to node indices using dataset.node_names
-        cluster_node_indices = []
-        for node_name in cluster_nodes:
-            if node_name in dataset.node_names:
-                cluster_node_indices.append(dataset.node_names.index(node_name))
-            else:
-                print(f"Warning: Node {node_name} not found in dataset.node_names. Skipping.")
-        
-        # Skip if no valid nodes are found in the cluster
-        if not cluster_node_indices:
-            print(f"Warning: Cluster {cluster_id} has no valid nodes. Skipping.")
+        # Skip empty clusters
+        if len(cluster_contigs) == 0:
+            print(f"Warning: Cluster {cluster_id} has no contigs assigned")
+            problematic_clusters.add(cluster_id)
             continue
+            
+        # Map contigs to node indices
+        cluster_nodes = []
+        for contig in cluster_contigs:
+            if contig not in dataset.node_names:
+                missing_nodes.append(contig)
+                continue
+                
+            node_idx = dataset.node_names.index(contig)
+            cluster_nodes.append(node_idx)
+            node_to_clusters[node_idx].append(cluster_id)
+            
+        # Store validated nodes
+        if cluster_nodes:
+            cluster_to_nodes[cluster_id] = cluster_nodes
+        else:
+            print(f"Warning: Cluster {cluster_id} has no valid nodes")
+            problematic_clusters.add(cluster_id)
 
-        # Convert to tensor and ensure it's on the correct device
-        cluster_node_indices = torch.tensor(cluster_node_indices, dtype=torch.long, device=data.edge_index.device)
+    # Report missing nodes (first 5 examples)
+    if missing_nodes:
+        print(f"\nError: {len(missing_nodes)} nodes missing from dataset.node_names")
+        print("Sample missing nodes:", missing_nodes[:5])
 
-        # Create fully connected edges within the cluster
-        num_nodes_in_cluster = len(cluster_node_indices)
-        if num_nodes_in_cluster > 1:
-            src = cluster_node_indices.repeat(num_nodes_in_cluster)
-            dst = torch.repeat_interleave(cluster_node_indices, num_nodes_in_cluster)
-            new_edges = torch.stack([src, dst], dim=0)
+    # Check for nodes in multiple clusters
+    duplicate_nodes = {node: clusters for node, clusters in node_to_clusters.items() 
+                      if len(clusters) > 1}
+    if duplicate_nodes:
+        print(f"\nError: {len(duplicate_nodes)} nodes belong to multiple clusters")
+        for node, clusters in list(duplicate_nodes.items())[:5]:
+            print(f"  Node {node} appears in clusters: {clusters}")
 
-            # Remove self-loops (optional, depending on your use case)
-            mask = new_edges[0] != new_edges[1]
-            new_edges = new_edges[:, mask]
+    # Final validation
+    valid_clusters = set(cluster_to_nodes.keys())
+    invalid_clusters = problematic_clusters - valid_clusters
+    
+    print(f"\nValidation results:")
+    print(f"- Valid clusters: {len(valid_clusters)}/{len(cluster_ids)}")
+    print(f"- Problematic clusters: {len(problematic_clusters)}")
+    print(f"- Nodes assigned: {sum(len(nodes) for nodes in cluster_to_nodes.values())}")
+    
+    if invalid_clusters:
+        print(f"\nWarning: {len(invalid_clusters)} clusters have no valid nodes:")
+        print(list(invalid_clusters)[:5], "...")
 
-            # Add new edges to the graph
-            data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
-            print(f"Added {new_edges.size(1)} edges for high-quality cluster {cluster_id}.")
-            total_added_edges += new_edges.size(1)  # Accumulate added edges
+    return cluster_to_nodes
 
-    changes['added'] = total_added_edges    
+
+def add_hq_cluster_edges(data, cluster_to_nodes):
+    data = data.clone()
+    changes = {'added': 0}
+    
+    # Convert to set for faster lookups (sorted tuples)
+    existing_pairs = {tuple(sorted((i.item(), j.item()))) 
+                     for i, j in data.edge_index.t()}
+    
+    new_edges = []
+    for cluster_id, node_indices in cluster_to_nodes.items():
+        if len(node_indices) < 2:
+            continue
+            
+        # Generate all possible pairs (both directions)
+        for i, u in enumerate(node_indices):
+            for v in node_indices[i+1:]:  # Avoid self-loops
+                pair = tuple(sorted((u, v)))
+                if pair not in existing_pairs:
+                    new_edges.extend([[u, v], [v, u]])  # Add both directions
+                    existing_pairs.add(pair)
+                    changes['added'] += 2
+    
+    if new_edges:
+        new_edges = torch.tensor(new_edges).t().to(data.edge_index.device)
+        data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
+        
+        # Verify
+        expected = sum(len(n)*(len(n)-1) for n in cluster_to_nodes.values())
+        print(f"Added {changes['added']}/{expected} undirected pairs")
+    
     return data, changes
 
 
-def remove_edges(data, dataset, cluster_ids, contig2bin):
-    """
-    Removes edges connected to nodes in high-quality clusters, but preserves edges between two HQ cluster nodes.
-    Args:
-        data: PyG Data object with edge_index.
-        cluster_ids: List of high-quality cluster IDs.
-        contig2bin: DataFrame mapping contigs to bins.
-        dataset: Dataset object containing node_names.
-    Returns:
-        data: Updated copy of the PyG Data object with removed edges.
-        changes: Dictionary of changes made to the graph.
-    """
-    changes = {'added': 0, 'removed': 0, 'isolated': 0}
-
-    # Get all HQ cluster node indices
-    hq_node_indices = []
-    for cluster_id in cluster_ids:
-        cluster_nodes = contig2bin[contig2bin['BINID'] == cluster_id]['SEQUENCEID'].tolist()
-        
-        # Convert node names to node indices using dataset.node_names
-        cluster_node_indices = []
-        for node_name in cluster_nodes:
-            if node_name in dataset.node_names:
-                cluster_node_indices.append(dataset.node_names.index(node_name))
-            else:
-                print(f"Warning: Node {node_name} not found in dataset.node_names. Skipping.")
-        
-        # Skip if no valid nodes are found in the cluster
-        if not cluster_node_indices:
-            print(f"Warning: Cluster {cluster_id} has no valid nodes. Skipping.")
-            continue
-
-        # Convert to tensor and ensure it's on the correct device
-        cluster_node_indices = torch.tensor(cluster_node_indices, dtype=torch.long, device=data.edge_index.device)
-        hq_node_indices.append(cluster_node_indices)
-
-    # Concatenate all HQ node indices
-    if hq_node_indices:
-        hq_node_indices = torch.cat(hq_node_indices)
-    else:
-        print("Warning: No valid HQ nodes found. No edges will be removed.")
-        return data, changes
-
-    # Create a mask to remove edges where one node is in an HQ cluster and the other is not
-    src, dst = data.edge_index
-    mask = ~(
-        (torch.isin(src, hq_node_indices) & ~torch.isin(dst, hq_node_indices)) |  # src is HQ, dst is not
-        (~torch.isin(src, hq_node_indices) & torch.isin(dst, hq_node_indices))    # src is not HQ, dst is HQ
+def remove_edges(data, cluster_to_nodes):
+    data = data.clone()
+    changes = {'removed': 0}
+    
+    # Get all HQ nodes as a tensor
+    hq_nodes = torch.tensor(
+        sorted({n for nodes in cluster_to_nodes.values() for n in nodes}),
+        device=data.edge_index.device
     )
-
-    # Apply the mask
-    removed_edges = data.edge_index.size(1) - mask.sum().item()
-    data.edge_index = data.edge_index[:, mask]
-    print(f"Removed {removed_edges} edges connected to high-quality clusters (excluding edges between HQ nodes).")
-
-    changes['removed'] = removed_edges
+    
+    src, dst = data.edge_index
+    to_remove = torch.zeros_like(src, dtype=torch.bool)
+    
+    # Vectorized check for HQ↔non-HQ edges
+    is_hq_src = torch.isin(src, hq_nodes)
+    is_hq_dst = torch.isin(dst, hq_nodes)
+    to_remove = (is_hq_src != is_hq_dst)  # XOR operation
+    
+    # Apply removal
+    data.edge_index = data.edge_index[:, ~to_remove]
+    changes['removed'] = to_remove.sum().item()
+    
+    # Final verification
+    src, dst = data.edge_index
+    leaks = torch.isin(src, hq_nodes) != torch.isin(dst, hq_nodes)
+    print(f"Removed {changes['removed']} edges | "
+          f"Remaining leaks: {leaks.sum().item()}")
+    
     return data, changes
 
-
+"""
 def depth_based_edge_pruning(data, dataset, node_depths, cluster_ids, contig2bin, depth_diff_threshold=1.305):
-    """
-    Prunes edges based on depth differences between nodes, but preserves edges between nodes in the same HQ cluster.
-    Args:
-        data: PyG Data object with edge_index.
-        node_depths: Tensor of node depths (shape: [num_nodes]).
-        cluster_ids: List of high-quality cluster IDs.
-        contig2bin: DataFrame mapping contigs to bins.
-        dataset: Dataset object containing node_names.
-        depth_diff_threshold: Maximum allowed depth difference for edge pruning.
-    Returns:
-        data: Updated copy of the PyG Data object with pruned edges.
-        changes: Dictionary of changes made to the graph.
-    """
+    
+    #Prunes edges based on depth differences between nodes, but preserves edges between nodes in the same HQ cluster.
+    #Args:
+    #    data: PyG Data object with edge_index.
+    #    node_depths: Tensor of node depths (shape: [num_nodes]).
+    #    cluster_ids: List of high-quality cluster IDs.
+    #    contig2bin: DataFrame mapping contigs to bins.
+    #    dataset: Dataset object containing node_names.
+    #    depth_diff_threshold: Maximum allowed depth difference for edge pruning.
+    #Returns:
+    #    data: Updated copy of the PyG Data object with pruned edges.
+    #    changes: Dictionary of changes made to the graph.
     changes = {'added': 0, 'removed': 0, 'isolated': 0}
     
     # Ensure node_depths is on the same device as data.edge_index    
@@ -812,21 +809,21 @@ def depth_based_edge_pruning(data, dataset, node_depths, cluster_ids, contig2bin
     changes['removed'] = removed_edges
     return data, changes
 
-from sklearn.neighbors import NearestNeighbors
 
+from sklearn.neighbors import NearestNeighbors
 def add_edges_based_on_depth_similarity(data, node_depths, similarity_threshold=0.98):
-    """
-    Adds edges between nodes with similar depth values (optimized for large graphs).
-    Args:
-        data: PyG Data object with edge_index.
-        node_depths: Tensor of node depths (shape: [num_nodes] for 1D or [num_nodes, 4] for 4D).
-        similarity_threshold: Minimum similarity (as a fraction of max depth difference) to add an edge.
-    Returns:
-        data: Updated copy of the PyG Data object with added edges.
-        changes: Dictionary of changes made to the graph.
-    """
-    changes = {'added': 0, 'removed': 0, 'isolated': 0}
     
+    #Adds edges between nodes with similar depth values (optimized for large graphs).
+    #Args:
+    #    data: PyG Data object with edge_index.
+    #    node_depths: Tensor of node depths (shape: [num_nodes] for 1D or [num_nodes, 4] for 4D).
+    #    similarity_threshold: Minimum similarity (as a fraction of max depth difference) to add an edge.
+    #Returns:
+    #    data: Updated copy of the PyG Data object with added edges.
+    #    changes: Dictionary of changes made to the graph.
+    
+    changes = {'added': 0, 'removed': 0, 'isolated': 0}
+    print(f"SELECTED SIMILARITY THRESHOLD: {similarity_threshold}")
     # Ensure node_depths is on the same device as data.edge_index    
     node_depths = node_depths.to(data.edge_index.device)
     
@@ -868,34 +865,71 @@ def add_edges_based_on_depth_similarity(data, node_depths, similarity_threshold=
         print("No edges added based on depth similarity.")
 
     return data, changes
+"""
 
+import faiss
 
-
-def weighted_edges_based_on_depth(data, node_depths, similarity_threshold=0.9):
+def add_edges_based_on_depth_similarity(data, node_depths, similarity_threshold=0.98, n_neighbors=100):
     """
-    Adds edge weights based on depth similarity between nodes.
+    Adds edges between nodes with similar depth values (optimized for large graphs using FAISS).
     Args:
         data: PyG Data object with edge_index.
-        node_depths: Tensor of node depths (shape: [num_nodes]).
-        similarity_threshold: Minimum depth similarity for edge weighting.
+        node_depths: Tensor of node depths (shape: [num_nodes] for 1D or [num_nodes, 4] for 4D).
+        similarity_threshold: Minimum similarity (as a fraction of max depth difference) to add an edge.
+        n_neighbors: Number of nearest neighbors to consider for each node.
     Returns:
-        data_copy: Updated copy of the PyG Data object with weighted edges.
+        data: Updated copy of the PyG Data object with added edges.
+        changes: Dictionary of changes made to the graph.
     """
     changes = {'added': 0, 'removed': 0, 'isolated': 0}
+    print(f"SELECTED SIMILARITY THRESHOLD: {similarity_threshold}")
     
-    # Ensure node_depths is on the same device as data.edge_index
+    # Ensure node_depths is on the same device as data.edge_index    
     node_depths = node_depths.to(data.edge_index.device)
     
-    # Normalize node depths
-    node_depths = (node_depths - node_depths.mean()) / node_depths.std()
+    # Normalize depth values
+    if node_depths.dim() == 1:  # 1D depth values
+        node_depths = (node_depths - node_depths.mean()) / node_depths.std()
+        node_depths_np = node_depths.cpu().numpy().reshape(-1, 1)  # Reshape to 2D for FAISS
+    elif node_depths.dim() == 2:  # 2D depth values (e.g., [num_nodes, 4])
+        node_depths = (node_depths - node_depths.mean(dim=0)) / node_depths.std(dim=0)
+        node_depths_np = node_depths.cpu().numpy()
+    else:
+        raise ValueError("node_depths must be 1D or 2D.")
 
-    # Apply weighted edges based on depth similarity
-    src, dst = data.edge_index
-    depth_similarity = 1 / (1 + torch.abs(node_depths[src] - node_depths[dst]))
-    depth_similarity[depth_similarity < similarity_threshold] = 0
-    data.edge_weight = depth_similarity
-    print(f"Added edge weights based on depth similarity (threshold: {similarity_threshold}).")
+    # Use FAISS for efficient nearest neighbor search
+    dimension = node_depths_np.shape[1]  # Dimensionality of depth values
+    index = faiss.IndexFlatL2(dimension)  # L2 distance (Euclidean)
+    index.add(node_depths_np)  # Add depth values to the index
 
+    # Search for nearest neighbors
+    k = min(n_neighbors, node_depths_np.shape[0])  # Number of neighbors to consider
+    distances, indices = index.search(node_depths_np, k)
+
+    # Convert distances to similarities
+    max_distance = np.max(distances)
+    similarities = 1 - (distances / max_distance)
+
+    # Add edges based on similarity threshold
+    new_edges = []
+    for i in range(indices.shape[0]):
+        for j, sim in zip(indices[i], similarities[i]):
+            if i < j and sim >= similarity_threshold:  # Avoid duplicate edges
+                new_edges.append((i, j))
+                new_edges.append((j, i))  # Add reverse edge for undirected graph
+
+    # Convert new edges to tensor
+    if new_edges:
+        new_edges = torch.tensor(new_edges, dtype=torch.long, device=data.edge_index.device).t()
+        # Add new edges to the graph
+        data.edge_index = torch.cat([data.edge_index, new_edges], dim=1)
+        size= new_edges.size(1)
+        print(f"Added {size} edges based on depth similarity (threshold: {similarity_threshold}).")
+        changes['added'] = size
+    else:
+        print("No edges added based on depth similarity.")
+
+    print(f"Total edges added: {changes['added']}")  # Print total edges added
     return data, changes
 
 
@@ -938,21 +972,28 @@ def update_graph_edges(data, dataset,
     cluster_ids = hq_clusters['Name'].tolist()
     print(f"Found {len(cluster_ids)} high-quality clusters.")
     
+    # After loading contig2bin and dataset, but before graph modifications
+    missing_nodes = [name for name in contig2bin['SEQUENCEID'] if name not in dataset.node_names]
+    print(f"Missing nodes in dataset.node_names: {len(missing_nodes)}")
+    if missing_nodes:
+        print("First 5 missing nodes:", missing_nodes[:5])
+    
     # Step 1: Add edges to HQ clusters
+    cluster_to_nodes = validate_cluster_nodes(cluster_ids, contig2bin, dataset)
     if add_hq_edges:
-        data_copy, edge_changes = add_hq_cluster_edges(data_copy, dataset, cluster_ids, contig2bin)
+        data_copy, edge_changes = add_hq_cluster_edges(data_copy, cluster_to_nodes)
         changes['added'] += edge_changes['added']
     # Step 2: Remove existing edges connected to HQ clusters (if enabled)
     if remove_existing_edges:
-        data_copy, edge_changes = remove_edges(data_copy, dataset, cluster_ids, contig2bin)
+        data_copy, edge_changes = remove_edges(data_copy, cluster_to_nodes)
         changes['removed'] += edge_changes['removed']
     # Step 3: Apply depth-based edge pruning (if enabled)
-    if depth_pruning:
-        data_copy, edge_changes = depth_based_edge_pruning(data_copy, dataset, node_depths, cluster_ids, contig2bin, depth_diff_threshold)
-        changes['removed'] += edge_changes['removed']
+    # if depth_pruning:
+    #    data_copy, edge_changes = depth_based_edge_pruning(data_copy, dataset, node_depths, cluster_ids, contig2bin, depth_diff_threshold)
+    #    changes['removed'] += edge_changes['removed']
     # Step 4: Apply weighted edges based on depth similarity (if enabled)
-    if depth_linking:
-        data_copy, edge_changes = add_edges_based_on_depth_similarity(data_copy, node_depths, similarity_threshold)
+    # if depth_linking:
+    #    data_copy, edge_changes = add_edges_based_on_depth_similarity(data_copy, node_depths, similarity_threshold)
         
     # Calculate node degrees using torch.bincount
     node_degrees = torch.bincount(data_copy.edge_index[0], minlength=data_copy.num_nodes)
@@ -1045,10 +1086,6 @@ def load_or_update_graph(data, dataset, base_directory, node_depths, add_hq_edge
         changes['isolated'] = isolated
         print(f"ISOLATED NODES FOUND: {isolated}")
     else:
-        if dataset.name =="strong100":
-            sim_thresh=0.99
-        else:
-            sim_thresh=0.90
         print(f"Updating graph and saving to {filepath}")
         # Step 5: Apply methodologies using update_graph_edges
         data, changes = update_graph_edges(
@@ -1061,7 +1098,7 @@ def load_or_update_graph(data, dataset, base_directory, node_depths, add_hq_edge
             depth_pruning=depth_pruning,
             depth_linking=depth_linking,
             depth_diff_threshold=depth_threshold,
-            similarity_threshold=sim_thresh
+            similarity_threshold=similarity_threshold
         )
         # Step 6: Save the updated graph
         torch.save(data, filepath)

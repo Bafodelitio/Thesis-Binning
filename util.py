@@ -650,7 +650,6 @@ class AssemblyDataset:
             contig_markers = read_contig_genes(scg_path)
             self.ref_marker_sets = ref_sets
             self.contig_markers = contig_markers
-            print(f"REF_SET LENGTH = {len(ref_sets)} AND CONtiG_MARKER LENGTH = {len(contig_markers)}")
             marker_counts = get_markers_to_contigs(ref_sets, contig_markers)
             self.markers = marker_counts
         else:
@@ -891,38 +890,6 @@ class AssemblyDataset:
         self.edges_dst = new_dsts
         self.edge_weights = np.array(new_weights)
         
-    """
-    def calculate_coverage_threshold(self, percentile=90):
-        
-        Calculate the coverage correlation threshold based on the distribution of coverage correlations.
-
-        Args:
-            percentile (int): The percentile to use for determining the threshold (default: 90).
-
-        Returns:
-            float: The coverage correlation threshold.
-        
-        # Ensure coverage data is available
-        if not hasattr(self, 'node_depths') or len(self.node_depths) == 0:
-            raise ValueError("Coverage data (node_depths) is not available in the dataset.")
-
-        # Compute pairwise coverage correlations
-        coverage = np.array(self.node_depths)
-        num_nodes = coverage.shape[0]
-        correlations = []
-
-        for i in range(num_nodes):
-            for j in range(i + 1, num_nodes):
-                corr = np.corrcoef(coverage[i], coverage[j])[0, 1]
-                if not np.isnan(corr):  # Ignore NaN values
-                    correlations.append(corr)
-
-        # Calculate the threshold based on the specified percentile
-        threshold = np.percentile(correlations, percentile)
-        print(f"Coverage correlation threshold (percentile={percentile}): {threshold:.4f}")
-        self.coverage_threshold = threshold
-        np.save(os.path.join(self.cache_dir, "coverage_threshold.npy"), self.coverage_threshold)
-       """
  
 def plot_and_save_loss(epoch_losses, iteration_name, value, save_dir):
     """
