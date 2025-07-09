@@ -54,7 +54,7 @@ def main():
         'weight_decay': 0.02,        
         'margin': 0.06,              
         'num_neighbors': 3,  
-        'epochs': 50,             
+        'epochs': 1,             
         'num_components': None      
     }
     
@@ -75,18 +75,19 @@ def main():
 
     # Specify the base directory for saving model results
     current_dir = Path(__file__).parent
-    base_path = "E:/FCT/Tese/Code/GNN/temp_res"  # Change this to your desired base path"
-    print(f"Results will be saved in: {base_path}")
+    base_path = (current_dir / "Results" / name)
 
+    # Ensure the base_path exists
+    base_path.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Results will be saved in: {base_path.as_posix()}")
 
     # Perform hyperparameter tuning
     # Este método treina o modelo com a configuração base de parametros 
     # e iterativamente atualiza o "parameter" para cada valor de "values", 
     # voltando a correr o modelo em cada iteração
     # (neste caso, o parâmetro values=None significa que o método vai correr apenas a configuração base sem alterações)
-    
-    
-    
+        
     hyperparameter_tuning(dataset=dataset, 
                           data=data, 
                           parameter='num_layers', 

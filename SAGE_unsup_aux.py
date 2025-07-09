@@ -6,13 +6,13 @@ from collections import Counter
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 from torch_geometric.nn import GraphSAGE
-from torch_geometric.utils import to_undirected, negative_sampling
+from torch_geometric.utils import to_undirected
 from sklearn.model_selection import train_test_split
 from vamb_clustering import cluster
 import numpy as np
 from collections import defaultdict
 import pandas as pd
-from util import plot_and_save_loss, get_last_iteration_number, compare_graphs, evaluate_contig_sets, is_undirected, get_undirected_edge_set, plot_pca_hq_clusters
+from util import plot_and_save_loss, get_last_iteration_number, evaluate_contig_sets, is_undirected, get_undirected_edge_set
 
 def encode(node_names):
     return [torch.tensor(name.encode('utf-8') for name in node_names)]
@@ -399,7 +399,9 @@ def test_value(dataset, data, parameter, value, config, base_path, results_df, c
         print(f"Final Loss: {loss}")
         
         # Plot and save loss curve
-        plot_and_save_loss(epoch_losses, current_iter, parameter, os.path.join(base_path, "losses"))
+        losses_path = base_path / "losses"
+        losses_path.mkdir(parents=True, exist_ok=True)
+        plot_and_save_loss(epoch_losses, current_iter, parameter, losses_path.as_posix())
     else:
         median_time = None
         epoch_losses = []
